@@ -18,7 +18,7 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-from pydantic import BaseModel as PydanticBaseModel, Field
+from pydantic import BaseModel as PydanticBaseModel, Field, create_model
 
 # ============================================================
 # Environment
@@ -36,7 +36,7 @@ if langsmith_api_key:
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 MCP_BASE_URL = os.getenv("MCP_BASE_URL", "https://agrigpt-backend-mcp.onrender.com")
 MCP_API_KEY = os.getenv("MCP_API_KEY")
-MCP_TIMEOUT = 10.0
+MCP_TIMEOUT = 30.0  # Increased from 10.0 to 30.0 seconds for better reliability
 
 # ============================================================
 # MCP Client
@@ -108,43 +108,71 @@ def build_agent():
         description = tool_schema.get("description", "")
         input_schema = tool_schema.get("inputSchema", {})
         print(f"🔨 Creating tool: {tool_name}")
+        print(f"   Input schema: {input_schema}")
 
         # Create closure to capture tool_name and schema
         def create_tool(name: str, desc: str, schema: Dict[str, Any]):
             # Create a Pydantic model for the tool arguments based on the schema
             properties = schema.get("properties", {})
             
-            # Build fields for the Pydantic model
-            fields = {}
+            print(f"   Processing properties: {list(properties.keys())}")
+            
+            # Build field definitions for Pydantic model
+            field_definitions = {}
             for prop_name, prop_details in properties.items():
-                prop_type = str
-                fields[prop_name] = (prop_type, Field(description=prop_details.get("description", "")))
+                prop_type = prop_details.get("type", "string")
+                
+                # Map JSON schema types to Python types
+                type_mapping = {
+                    "string": str,
+                    "integer": int,
+                    "number": float,
+                    "boolean": bool,
+                    "array": list,
+                    "object": dict
+                }
+                
+                py_type = type_mapping.get(prop_type, str)
+                description_text = prop_details.get("description", "")
+                required = prop_name in schema.get("required", [])
+                
+                if required:
+                    field_definitions[prop_name] = (py_type, Field(..., description=description_text))
+                else:
+                    field_definitions[prop_name] = (py_type, Field(default=None, description=description_text))
             
-            # Dynamically create the args schema class
-            ArgsSchema = type(f"{name}_args", (PydanticBaseModel,), {
-                "__annotations__": {k: v[0] for k, v in fields.items()},
-                **{k: v[1] for k, v in fields.items()}
-            })
+            # Dynamically create the args schema class using pydantic's create_model
+            ArgsSchema = create_model(
+                f"{name}_args",
+                **field_definitions
+            )
             
-            def remote_tool_func(message: str) -> str:
+            print(f"   ArgsSchema fields: {ArgsSchema.model_fields.keys()}")
+            
+            # Create function that accepts **kwargs to match the schema
+            def remote_tool_func(**kwargs) -> str:
                 print(f"🎯 Executing remote tool: {name}")
-                print(f"📝 Tool arguments received: message={message}")
-                arguments = {"message": message}
+                print(f"📝 Tool arguments received: {kwargs}")
                 try:
-                    result = mcp_client.call_tool(name, arguments)
+                    result = mcp_client.call_tool(name, kwargs)
                     print(f"✨ Tool execution successful: {result}")
                     return str(result)
                 except Exception as e:
                     error_msg = f"Remote MCP error: {str(e)}"
                     print(f"❌ Tool execution failed: {error_msg}")
+                    import traceback
+                    traceback.print_exc()
                     return error_msg
             
-            return StructuredTool.from_function(
+            tool = StructuredTool.from_function(
                 func=remote_tool_func,
                 name=name,
                 description=desc,
                 args_schema=ArgsSchema
             )
+            
+            print(f"   ✅ Tool created successfully")
+            return tool
 
         dynamic_tools.append(create_tool(tool_name, description, input_schema))
 
@@ -251,10 +279,27 @@ def chat(request: ChatRequest):
         for i, msg in enumerate(result["messages"]):
             print(f"Message {i}: {type(msg).__name__}")
             if isinstance(msg, AIMessage):
-                final_answer = msg.content
-                print(f"  ✅ Final answer extracted: {final_answer[:100]}...")
+                # Handle both string and list responses from LLM
+                if isinstance(msg.content, str):
+                    # Content is already a string
+                    final_answer = msg.content
+                    print(f"  ✅ Final answer extracted (string): {final_answer[:100]}...")
+                elif isinstance(msg.content, list) and len(msg.content) > 0:
+                    # Content is a list of content blocks
+                    if isinstance(msg.content[0], dict) and 'text' in msg.content[0]:
+                        # Extract text from first content block
+                        final_answer = msg.content[0]['text']
+                        print(f"  ✅ Final answer extracted (from list): {final_answer[:100]}...")
+                    else:
+                        # Fallback: convert to string
+                        final_answer = str(msg.content[0])
+                        print(f"  ✅ Final answer extracted (converted): {final_answer[:100]}...")
+                else:
+                    # Fallback: convert entire content to string
+                    final_answer = str(msg.content)
+                    print(f"  ✅ Final answer extracted (fallback): {final_answer[:100]}...")
 
-        print(f"\n🎉 Returning response: {final_answer}\n")
+        print(f"\n🎉 Returning response: {str(final_answer)[:100]}\n")
         return ChatResponse(response=final_answer)
 
     except Exception as e:
