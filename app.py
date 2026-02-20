@@ -514,3 +514,4 @@ def test_chat(request: TestChatRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8020)
+    print("Done")
