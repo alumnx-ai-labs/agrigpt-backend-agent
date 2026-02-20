@@ -17,15 +17,15 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}       # Your EC2 public IP
-          username: ${{ secrets.EC2_USER }}   # e.g. ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}     # Contents of your .pem file
+          host: ${{ secrets.EC2_HOST }}       # 13.205.59.184
+          username: ${{ secrets.EC2_USER }}   # ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}     # Contents of backend-leet.pem
           port: 22
           script: |
             set -e
 
             echo "==> Navigating to app directory"
-            cd /home/${{ secrets.EC2_USER }}/agrigpt/agent
+            cd /agrigpt/agent
 
             echo "==> Pulling latest code"
             git pull origin main
@@ -37,9 +37,9 @@ jobs:
             pip install -r requirements.txt --quiet
 
             echo "==> Restarting systemd service"
-            sudo systemctl restart agrigpt-backend-agent
+            sudo systemctl restart agrigpt-agent.service
 
             echo "==> Service status"
-            sudo systemctl status agrigpt-backend-agent --no-pager
+            sudo systemctl status agrigpt-agent.service --no-pager
 
             echo "✅ Deployment complete!"
