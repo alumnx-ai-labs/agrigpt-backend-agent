@@ -2,7 +2,7 @@
 FastAPI + LangGraph Agent with Remote MCP Tool Discovery
 WhatsApp Business API (Meta Cloud API) Webhook Handler
 MongoDB-backed per-user conversation memory (last 5 message pairs)
-Auto Deploy enabled using deploy.yml
+Auto Deploy enabled using deploy.yml file
 """
 
 import os
