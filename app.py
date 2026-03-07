@@ -35,6 +35,8 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from google import genai as google_genai
+from google.genai import types as google_genai_types
 
 from pymongo import MongoClient, ASCENDING
 from pymongo.collection import Collection
@@ -1056,32 +1058,65 @@ def clean_response_text(text: str) -> str:
     return cleaned
 
 
-def get_gemini_fallback(query: str) -> tuple[str, str]:
+def get_gemini_fallback(query: str, history: List = None) -> tuple[str, str]:
     """
-    Call Gemini API directly when tools don't find answers.
-    
+    Call Gemini API with Google Search grounding when tools don't find answers.
+    Includes conversation history for context-aware responses.
+
     Returns: (answer, status) where status is "success" or "error"
     """
-    print(f"[gemini_fallback] Calling Gemini for query: {query[:60]}")
+    print(f"[gemini_fallback] Calling Gemini Web Search for query: {query[:60]}")
     try:
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.7,
-            google_api_key=GOOGLE_API_KEY,
+        client = google_genai.Client(api_key=GOOGLE_API_KEY)
+
+        # Build conversation context from history
+        context = ""
+        if history:
+            context_lines = []
+            for msg in history:
+                if isinstance(msg, HumanMessage):
+                    context_lines.append(f"User: {msg.content}")
+                elif isinstance(msg, AIMessage) and msg.content:
+                    context_lines.append(f"Assistant: {msg.content}")
+            if context_lines:
+                context = "Previous conversation:\n" + "\n".join(context_lines[-10:]) + "\n\n"
+
+        prompt = (
+            "You are an expert agricultural assistant. Answer the following question "
+            "with accurate, detailed information about agriculture, crops, pests, and "
+            "farming practices. Use web search to find the most current information.\n\n"
+            f"{context}"
+            f"Question: {query}"
         )
-        
-        response = llm.invoke([
-            SystemMessage(content="You are an expert agricultural assistant. Provide clear, detailed answers about agriculture, crops, pests, and farming practices."),
-            HumanMessage(content=query)
-        ])
-        
-        answer = response.content if hasattr(response, 'content') else str(response)
-        print(f"[gemini_fallback] ✓ Got answer from Gemini ({len(answer)} chars)")
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config=google_genai_types.GenerateContentConfig(
+                tools=[google_genai_types.Tool(google_search=google_genai_types.GoogleSearch())]
+            ),
+        )
+        answer = response.text
+        print(f"[gemini_fallback] ✓ Got answer from Gemini Web Search ({len(answer)} chars)")
         return answer, "success"
-    
+
     except Exception as e:
-        print(f"[gemini_fallback] ✗ Error calling Gemini: {e}")
-        return f"Unable to generate answer: {str(e)}", "error"
+        print(f"[gemini_fallback] ✗ Gemini Web Search failed: {e}. Trying without search...")
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                temperature=0.7,
+                google_api_key=GOOGLE_API_KEY,
+            )
+            response = llm.invoke([
+                SystemMessage(content="You are an expert agricultural assistant. Provide clear, detailed answers about agriculture, crops, pests, and farming practices."),
+                HumanMessage(content=query)
+            ])
+            answer = response.content if hasattr(response, 'content') else str(response)
+            print(f"[gemini_fallback] ✓ Got answer from Gemini ({len(answer)} chars)")
+            return answer, "success"
+        except Exception as e2:
+            print(f"[gemini_fallback] ✗ Error calling Gemini: {e2}")
+            return f"Unable to generate answer: {str(e2)}", "error"
 
 
 def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
@@ -1124,63 +1159,53 @@ def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
                 print(f"  → Could not parse string as JSON")
                 continue
         
-        if not isinstance(result_data, dict):
-            print(f"  → Result is not a dict")
+        # Strategy 1: direct list result (VignanUniversity returns list directly)
+        if isinstance(result_data, list):
+            if len(result_data) > 0:
+                print(f"  → ✓ Result is a list with {len(result_data)} items")
+                return True
             continue
-        
+
+        if not isinstance(result_data, dict):
+            print(f"  → Result is not a dict or list, skipping")
+            continue
+
         # Check for error status
         if result_data.get("status") == "error":
             print(f"  → Status is error")
             continue
-        
+
         print(f"  → Result keys: {list(result_data.keys())}")
-        
-        # Strategy 1: Check for 'sources' field (pests_and_diseases format)
+
+        # Strategy 2: 'sources' field (pests_and_diseases format)
         if result_data.get("sources"):
             sources_list = result_data["sources"]
             if isinstance(sources_list, list) and len(sources_list) > 0:
                 print(f"  → ✓ Found 'sources' list with {len(sources_list)} items")
                 return True
-        
-        # Strategy 2: Check for 'information' field (pests_and_diseases format)
+
+        # Strategy 3: 'information' field
         if result_data.get("information"):
             info_text = str(result_data["information"])
             if len(info_text) > 50:
                 print(f"  → ✓ Found substantial 'information' field ({len(info_text)} chars)")
                 return True
-        
-        # Strategy 3: Check for 'results' field (sme_divesh format)
+
+        # Strategy 4: 'results' field (sme_divesh format)
         if result_data.get("results"):
             results_list = result_data["results"]
             if isinstance(results_list, list) and len(results_list) > 0:
                 print(f"  → ✓ Found 'results' list with {len(results_list)} items")
-                # Check if results have meaningful content
-                for item in results_list:
-                    if isinstance(item, dict):
-                        # Check for source field
-                        if item.get("source"):
-                            print(f"    → Found result with 'source' field")
-                            return True
-                        # Check for text/content
-                        if item.get("text") or item.get("content"):
-                            text = str(item.get("text") or item.get("content"))
-                            if len(text) > 20:
-                                print(f"    → Found result with substantial text ({len(text)} chars)")
-                                return True
-        
-        # Strategy 4: Check for 'query' and 'results' (sme_divesh fallback)
+                return True
+
+        # Strategy 5: 'query' + 'results' (sme_divesh fallback)
         if result_data.get("query") and result_data.get("results"):
             print(f"  → ✓ Found sme_divesh format with query and results")
             return True
-        
-        # Strategy 5: Check for direct list results (some tools return list)
-        if isinstance(result_data, list) and len(result_data) > 0:
-            print(f"  → ✓ Result is a list with {len(result_data)} items")
-            return True
-        
-        # Strategy 6: Check if result has any substantial data
+
+        # Strategy 6: any substantial JSON content
         result_str = json.dumps(result_data)
-        if len(result_str) > 100:  # Non-trivial amount of data
+        if len(result_str) > 100:
             print(f"  → ✓ Result has substantial JSON content ({len(result_str)} chars)")
             return True
     
@@ -1222,7 +1247,7 @@ def test_chat(request: ChatRequest):
         # to guide the agent to use tools
         system_prompt = SystemMessage(content="""You are AgriGPT, an expert agricultural assistant powered by a knowledge base of agricultural research and resources.
 
-YOUR MISSION: Provide accurate, helpful answers using the knowledge base tools.
+YOUR MISSION: Always provide a complete, helpful answer. Never refuse or say you cannot answer.
 
 TOOL USAGE (MANDATORY):
 1. Always call at least ONE tool before answering:
@@ -1233,7 +1258,9 @@ TOOL USAGE (MANDATORY):
 
 2. Use tool results as your PRIMARY source of information
 
-3. If tools don't return relevant data, acknowledge this honestly
+3. If tools return partial or loosely related results, USE them anyway and combine with your own agricultural knowledge to give a complete answer. NEVER say you could not find information.
+
+4. NEVER say: "I could not find", "I am sorry", "I don't have specific information", "the knowledge base did not return", or any apologetic phrases. Just answer directly and helpfully.
 
 RESPONSE FORMATTING RULES (CRITICAL):
 - Write in PLAIN TEXT only - NO markdown, NO special characters
@@ -1245,10 +1272,9 @@ RESPONSE FORMATTING RULES (CRITICAL):
   - Separate sections with blank lines
 - Keep responses concise (150-300 words ideally)
 - Be conversational but professional
-- Mention which tool provided your information
 
 EXAMPLE GOOD RESPONSE:
-The best time to plant tomatoes is during early spring or late winter in most regions. According to the sme_divesh knowledge base:
+The best time to plant tomatoes is during early spring or late winter in most regions.
 
 1. Soil temperature should be at least 60°F (15°C)
 2. Plant seedlings 2-3 feet apart
@@ -1259,9 +1285,7 @@ Key considerations:
 - Provide support structures like cages or stakes
 - Mulch around plants to retain moisture
 
-For more specific guidance for your region, consult local agricultural extension services.
-
-Remember: Clear, helpful, properly formatted responses build trust with users. Do NOT use markdown formatting.""")
+Remember: Always give a complete, direct answer. No apologies, no refusals. Do NOT use markdown formatting.""")
         
         # Remove any existing system messages and add fresh one
         history = [msg for msg in history if not isinstance(msg, SystemMessage)]
@@ -1330,12 +1354,12 @@ Remember: Clear, helpful, properly formatted responses build trust with users. D
             # ❌ Tools didn't find results - use Gemini fallback
             print("[STEP 3] ❌ Tools found NO meaningful results - using GEMINI FALLBACK")
             
-            # Call Gemini
-            gemini_answer, gemini_status = get_gemini_fallback(request.message)
+            # Call Gemini with conversation history for context
+            gemini_answer, gemini_status = get_gemini_fallback(request.message, history)
             
             if gemini_status == "success":
-                final_answer = f"I couldn't find specific information about this topic in the knowledge base tools. Based on general agricultural knowledge:\n\n{gemini_answer}"
-                sources = ["Gemini API"]
+                final_answer = gemini_answer
+                sources = ["Gemini Web Search"]
                 print("[STEP 3] ✓ Gemini fallback successful")
             else:
                 final_answer = f"I couldn't find information about this topic in the knowledge base, and the general knowledge retrieval also encountered an issue. Error: {gemini_answer}"
