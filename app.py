@@ -1159,63 +1159,53 @@ def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
                 print(f"  → Could not parse string as JSON")
                 continue
         
-        if not isinstance(result_data, dict):
-            print(f"  → Result is not a dict")
+        # Strategy 1: direct list result (VignanUniversity returns list directly)
+        if isinstance(result_data, list):
+            if len(result_data) > 0:
+                print(f"  → ✓ Result is a list with {len(result_data)} items")
+                return True
             continue
-        
+
+        if not isinstance(result_data, dict):
+            print(f"  → Result is not a dict or list, skipping")
+            continue
+
         # Check for error status
         if result_data.get("status") == "error":
             print(f"  → Status is error")
             continue
-        
+
         print(f"  → Result keys: {list(result_data.keys())}")
-        
-        # Strategy 1: Check for 'sources' field (pests_and_diseases format)
+
+        # Strategy 2: 'sources' field (pests_and_diseases format)
         if result_data.get("sources"):
             sources_list = result_data["sources"]
             if isinstance(sources_list, list) and len(sources_list) > 0:
                 print(f"  → ✓ Found 'sources' list with {len(sources_list)} items")
                 return True
-        
-        # Strategy 2: Check for 'information' field (pests_and_diseases format)
+
+        # Strategy 3: 'information' field
         if result_data.get("information"):
             info_text = str(result_data["information"])
             if len(info_text) > 50:
                 print(f"  → ✓ Found substantial 'information' field ({len(info_text)} chars)")
                 return True
-        
-        # Strategy 3: Check for 'results' field (sme_divesh format)
+
+        # Strategy 4: 'results' field (sme_divesh format)
         if result_data.get("results"):
             results_list = result_data["results"]
             if isinstance(results_list, list) and len(results_list) > 0:
                 print(f"  → ✓ Found 'results' list with {len(results_list)} items")
-                # Check if results have meaningful content
-                for item in results_list:
-                    if isinstance(item, dict):
-                        # Check for source field
-                        if item.get("source"):
-                            print(f"    → Found result with 'source' field")
-                            return True
-                        # Check for text/content
-                        if item.get("text") or item.get("content"):
-                            text = str(item.get("text") or item.get("content"))
-                            if len(text) > 20:
-                                print(f"    → Found result with substantial text ({len(text)} chars)")
-                                return True
-        
-        # Strategy 4: Check for 'query' and 'results' (sme_divesh fallback)
+                return True
+
+        # Strategy 5: 'query' + 'results' (sme_divesh fallback)
         if result_data.get("query") and result_data.get("results"):
             print(f"  → ✓ Found sme_divesh format with query and results")
             return True
-        
-        # Strategy 5: Check for direct list results (some tools return list)
-        if isinstance(result_data, list) and len(result_data) > 0:
-            print(f"  → ✓ Result is a list with {len(result_data)} items")
-            return True
-        
-        # Strategy 6: Check if result has any substantial data
+
+        # Strategy 6: any substantial JSON content
         result_str = json.dumps(result_data)
-        if len(result_str) > 100:  # Non-trivial amount of data
+        if len(result_str) > 100:
             print(f"  → ✓ Result has substantial JSON content ({len(result_str)} chars)")
             return True
     
@@ -1369,7 +1359,7 @@ Remember: Clear, helpful, properly formatted responses build trust with users. D
             gemini_answer, gemini_status = get_gemini_fallback(request.message, history)
             
             if gemini_status == "success":
-                final_answer = f"I couldn't find specific information about this topic in the knowledge base tools. Based on general agricultural knowledge:\n\n{gemini_answer}"
+                final_answer = gemini_answer
                 sources = ["Gemini Web Search"]
                 print("[STEP 3] ✓ Gemini fallback successful")
             else:
