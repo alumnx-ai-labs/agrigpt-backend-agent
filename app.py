@@ -35,6 +35,8 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from google import genai as google_genai
+from google.genai import types as google_genai_types
 
 from pymongo import MongoClient, ASCENDING
 from pymongo.collection import Collection
@@ -1056,32 +1058,65 @@ def clean_response_text(text: str) -> str:
     return cleaned
 
 
-def get_gemini_fallback(query: str) -> tuple[str, str]:
+def get_gemini_fallback(query: str, history: List = None) -> tuple[str, str]:
     """
-    Call Gemini API directly when tools don't find answers.
-    
+    Call Gemini API with Google Search grounding when tools don't find answers.
+    Includes conversation history for context-aware responses.
+
     Returns: (answer, status) where status is "success" or "error"
     """
-    print(f"[gemini_fallback] Calling Gemini for query: {query[:60]}")
+    print(f"[gemini_fallback] Calling Gemini Web Search for query: {query[:60]}")
     try:
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.7,
-            google_api_key=GOOGLE_API_KEY,
+        client = google_genai.Client(api_key=GOOGLE_API_KEY)
+
+        # Build conversation context from history
+        context = ""
+        if history:
+            context_lines = []
+            for msg in history:
+                if isinstance(msg, HumanMessage):
+                    context_lines.append(f"User: {msg.content}")
+                elif isinstance(msg, AIMessage) and msg.content:
+                    context_lines.append(f"Assistant: {msg.content}")
+            if context_lines:
+                context = "Previous conversation:\n" + "\n".join(context_lines[-10:]) + "\n\n"
+
+        prompt = (
+            "You are an expert agricultural assistant. Answer the following question "
+            "with accurate, detailed information about agriculture, crops, pests, and "
+            "farming practices. Use web search to find the most current information.\n\n"
+            f"{context}"
+            f"Question: {query}"
         )
-        
-        response = llm.invoke([
-            SystemMessage(content="You are an expert agricultural assistant. Provide clear, detailed answers about agriculture, crops, pests, and farming practices."),
-            HumanMessage(content=query)
-        ])
-        
-        answer = response.content if hasattr(response, 'content') else str(response)
-        print(f"[gemini_fallback] ✓ Got answer from Gemini ({len(answer)} chars)")
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config=google_genai_types.GenerateContentConfig(
+                tools=[google_genai_types.Tool(google_search=google_genai_types.GoogleSearch())]
+            ),
+        )
+        answer = response.text
+        print(f"[gemini_fallback] ✓ Got answer from Gemini Web Search ({len(answer)} chars)")
         return answer, "success"
-    
+
     except Exception as e:
-        print(f"[gemini_fallback] ✗ Error calling Gemini: {e}")
-        return f"Unable to generate answer: {str(e)}", "error"
+        print(f"[gemini_fallback] ✗ Gemini Web Search failed: {e}. Trying without search...")
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                temperature=0.7,
+                google_api_key=GOOGLE_API_KEY,
+            )
+            response = llm.invoke([
+                SystemMessage(content="You are an expert agricultural assistant. Provide clear, detailed answers about agriculture, crops, pests, and farming practices."),
+                HumanMessage(content=query)
+            ])
+            answer = response.content if hasattr(response, 'content') else str(response)
+            print(f"[gemini_fallback] ✓ Got answer from Gemini ({len(answer)} chars)")
+            return answer, "success"
+        except Exception as e2:
+            print(f"[gemini_fallback] ✗ Error calling Gemini: {e2}")
+            return f"Unable to generate answer: {str(e2)}", "error"
 
 
 def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
@@ -1330,12 +1365,12 @@ Remember: Clear, helpful, properly formatted responses build trust with users. D
             # ❌ Tools didn't find results - use Gemini fallback
             print("[STEP 3] ❌ Tools found NO meaningful results - using GEMINI FALLBACK")
             
-            # Call Gemini
-            gemini_answer, gemini_status = get_gemini_fallback(request.message)
+            # Call Gemini with conversation history for context
+            gemini_answer, gemini_status = get_gemini_fallback(request.message, history)
             
             if gemini_status == "success":
                 final_answer = f"I couldn't find specific information about this topic in the knowledge base tools. Based on general agricultural knowledge:\n\n{gemini_answer}"
-                sources = ["Gemini API"]
+                sources = ["Gemini Web Search"]
                 print("[STEP 3] ✓ Gemini fallback successful")
             else:
                 final_answer = f"I couldn't find information about this topic in the knowledge base, and the general knowledge retrieval also encountered an issue. Error: {gemini_answer}"
