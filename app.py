@@ -423,7 +423,7 @@ def build_agent():
 
     # ── LLM ──────────────────────────────────────────────────────────────────
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         temperature=0,
         google_api_key=GOOGLE_API_KEY,
     )
@@ -567,7 +567,7 @@ async def get_gemini_fallback_answer(user_question: str) -> str:
     try:
         print(f"[Gemini Fallback] Calling Gemini API for: {user_question[:60]}")
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             temperature=0.7,
             google_api_key=GOOGLE_API_KEY,
         )
@@ -757,6 +757,13 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
         print(f"[Webhook] Parse error: {exc}")
 
     return {"status": "ok"}
+ 
+ 
+@app.get("/hello")
+async def hello():
+    """Simple hello endpoint."""
+    print("hello claude!!")
+    return {"message": "hello claude!!"}
 
 
 # ============================================================
@@ -1119,6 +1126,23 @@ def get_gemini_fallback(query: str, history: List = None) -> tuple[str, str]:
             return f"Unable to generate answer: {str(e2)}", "error"
 
 
+_AGRI_KEYWORDS = {
+    "farm", "crop", "plant", "soil", "fertilizer", "pest", "disease", "harvest",
+    "irrigation", "seed", "yield", "agriculture", "mango", "paddy", "wheat",
+    "vegetable", "fruit", "tree", "cultivation", "organic", "drone", "field",
+    "farmer", "manure", "urea", "dap", "potash", "fungus", "insect", "weed",
+    "spray", "pesticide", "herbicide", "compost", "nitrogen", "phosphorus",
+    "potassium", "npk", "sowing", "planting", "pruning", "flowering", "fruiting",
+    "canopy", "orchard", "greenhouse", "drip", "mulch", "blight", "rot", "mite",
+    "scheme", "subsidy", "kisan", "krishi", "खेत", "फसल", "खाद", "కృషి", "పంట",
+}
+
+def is_agriculture_query(message: str) -> bool:
+    """Return True if the message is about agriculture/farming topics."""
+    q = message.lower()
+    return any(kw in q for kw in _AGRI_KEYWORDS)
+
+
 def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
     """
     Check if tool results contain meaningful information.
@@ -1341,29 +1365,32 @@ Remember: Always give a complete, direct answer. No apologies, no refusals. Do N
         # ========== STEP 3: Extract sources or use Gemini fallback ==========
         print("\n[STEP 3] Deciding source strategy...")
         
-        if has_meaningful:
-            # ✅ Tools found results - extract sources
-            print("[STEP 3] ✅ Tools found meaningful results - using KNOWLEDGE BASE answer")
+        if has_meaningful and is_agriculture_query(request.message):
+            # ✅ Agriculture query + KB has results → use KB sources
+            print("[STEP 3] ✅ Agriculture query with KB results - extracting sources")
             sources = extract_sources_from_tool_results(tool_results_list)
             print(f"[STEP 3] Extracted sources: {sources}")
-            
             if not sources:
                 sources = ["Knowledge Base"]
-        
+
+        elif has_meaningful and not is_agriculture_query(request.message):
+            # ✅ Tools ran but question is general knowledge → Gemini answered, not KB
+            print("[STEP 3] Non-agriculture query answered by Gemini AI")
+            sources = ["Gemini Web Search"]
+
         else:
-            # ❌ Tools didn't find results - use Gemini fallback
-            print("[STEP 3] ❌ Tools found NO meaningful results - using GEMINI FALLBACK")
-            
-            # Call Gemini with conversation history for context
+            # ❌ Tools found no meaningful results - use Gemini fallback
+            print("[STEP 3] ❌ No meaningful KB results - using GEMINI FALLBACK")
+
             gemini_answer, gemini_status = get_gemini_fallback(request.message, history)
-            
+
             if gemini_status == "success":
                 final_answer = gemini_answer
                 sources = ["Gemini Web Search"]
                 print("[STEP 3] ✓ Gemini fallback successful")
             else:
-                final_answer = f"I couldn't find information about this topic in the knowledge base, and the general knowledge retrieval also encountered an issue. Error: {gemini_answer}"
-                sources = ["Error - Unable to retrieve"]
+                final_answer = f"I couldn't find information about this topic. Error: {gemini_answer}"
+                sources = ["Gemini Web Search"]
                 print("[STEP 3] ✗ Gemini fallback failed")
         
         # ========== STEP 4: Clean and format response ==========
@@ -1404,4 +1431,4 @@ def chat(request: ChatRequest):
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8030)
+    uvicorn.run(app, host="0.0.0.0", port=8020)
