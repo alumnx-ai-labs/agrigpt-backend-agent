@@ -1116,6 +1116,82 @@ def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
     return False
 
 
+# ============================================================
+# FastAPI App
+# ============================================================
+app = FastAPI(title="AgriGPT Agent")
+
+
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode:         str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+    hub_challenge:    str = Query(None, alias="hub.challenge"),
+):
+    LOCAL_VERIFY_TOKEN = "test_verify_token_123"
+    if hub_mode == "subscribe" and hub_verify_token == LOCAL_VERIFY_TOKEN:
+        print("Webhook verified successfully.")
+        return PlainTextResponse(content=hub_challenge, status_code=200)
+    raise HTTPException(status_code=403, detail="Webhook verification failed.")
+
+
+@app.post("/webhook")
+async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Receives WhatsApp events. Returns 200 immediately, processes in background."""
+    payload = await request.json()
+    print(f"[Webhook] Incoming payload: {payload}")
+    try:
+        entry    = payload.get("entry", [{}])[0]
+        changes  = entry.get("changes", [{}])[0]
+        value    = changes.get("value", {})
+        messages = value.get("messages", [])
+
+        if not messages:
+            return {"status": "ok"}
+
+        message  = messages[0]
+        msg_type = message.get("type")
+        if msg_type != "text":
+            return {"status": "ok"}
+
+        phone_number = message.get("from")
+        user_message = message["text"].get("body", "").strip()
+        if not phone_number or not user_message:
+            return {"status": "ok"}
+
+        print(f"[Webhook] Message from {phone_number}: {user_message}")
+
+    except Exception as exc:
+        import traceback; traceback.print_exc()
+        print(f"[Webhook] Parse error: {exc}")
+
+    return {"status": "ok"}
+
+
+@app.get("/hello")
+def hello():
+    return {"message": "hello claude"}
+
+
+# ============================================================
+# Chat Endpoint Models
+# ============================================================
+class ChatRequest(BaseModel):
+    chatId:       str
+    phone_number: str
+    message:      str
+
+
+class ChatResponse(BaseModel):
+    chatId:       str
+    phone_number: str
+    response:     str
+    sources:      List[str] = []
+
+
+# ============================================================
+# MAIN CHAT ENDPOINT (Fixed)
+# ============================================================
 @app.post("/test/chat", response_model=ChatResponse)
 def test_chat(request: ChatRequest):
     """
